@@ -1,15 +1,21 @@
 // Dashboard — three variations
 const { useMemo: useMemoD, useState: useStateD } = React;
 
-function useDashboardData(txns) {
+function useDashboardData(txns, selectedMonth) {
   return useMemoD(() => {
     const today = new Date();
-    const curKey = today.toISOString().slice(0, 7);
-    const months = [];
+    const todayKey = today.toISOString().slice(0, 7);
+
+    // Build month list from all transactions + last 6 months
+    const monthSet = new Set();
     for (let i = 5; i >= 0; i--) {
       const d = new Date(today); d.setMonth(d.getMonth() - i); d.setDate(1);
-      months.push(d.toISOString().slice(0, 7));
+      monthSet.add(d.toISOString().slice(0, 7));
     }
+    txns.forEach((t) => monthSet.add(t.date.slice(0, 7)));
+    const months = Array.from(monthSet).sort();
+
+    const curKey = selectedMonth || todayKey;
 
     const byMonth = {};
     months.forEach((m) => byMonth[m] = { income: 0, spend: 0, byCat: {} });
@@ -23,9 +29,10 @@ function useDashboardData(txns) {
       }
     });
 
-    const cur = byMonth[curKey];
-    const prevKey = months[months.length - 2];
-    const prev = byMonth[prevKey];
+    const cur = byMonth[curKey] || { income: 0, spend: 0, byCat: {} };
+    const curIdx = months.indexOf(curKey);
+    const prevKey = curIdx > 0 ? months[curIdx - 1] : null;
+    const prev = (prevKey && byMonth[prevKey]) || { income: 0, spend: 0, byCat: {} };
 
     // Top categories this month
     const catEntries = Object.entries(cur.byCat).sort((a, b) => b[1] - a[1]);
@@ -33,8 +40,9 @@ function useDashboardData(txns) {
       label: window.catById(cid).name, value: -v, color: window.catById(cid).color, categoryId: cid,
     }));
 
-    // Daily spend for this month (for heatmap & sparkline)
-    const daysIn = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+    // Daily spend for selected month
+    const [curY, curM] = curKey.split('-').map(Number);
+    const daysIn = new Date(curY, curM, 0).getDate();
     const dayTotals = Array(daysIn).fill(0);
     txns.forEach((t) => {
       if (t.date.slice(0, 7) !== curKey) return;
@@ -66,16 +74,17 @@ function useDashboardData(txns) {
     const monthlySpend = months.map((m) => ({ x: window.monthLabel(m).split(" ")[0], y: byMonth[m].spend }));
     const monthlyIncome = months.map((m) => ({ x: window.monthLabel(m).split(" ")[0], y: byMonth[m].income }));
 
-    return { cur, prev, topCats, dayTotals, cum, prevCum, monthlySpend, monthlyIncome, months, byMonth, curKey, daysIn };
-  }, [txns]);
+    return { cur, prev, topCats, dayTotals, cum, prevCum, monthlySpend, monthlyIncome, months, byMonth, curKey, todayKey, daysIn };
+  }, [txns, selectedMonth]);
 }
 
 // ---------- Variation A: Summary ----------
-function DashboardSummary({ txns, onOpenTxn }) {
-  const data = useDashboardData(txns);
+function DashboardSummary({ txns, onOpenTxn, selectedMonth, nav }) {
+  const data = useDashboardData(txns, selectedMonth);
   const today = new Date();
-  const dayOfMonth = today.getDate();
-  const projectedSpend = (data.cur.spend / dayOfMonth) * data.daysIn;
+  const isCurrentMonth = data.curKey === data.todayKey;
+  const dayOfMonth = isCurrentMonth ? today.getDate() : data.daysIn;
+  const projectedSpend = isCurrentMonth ? (data.cur.spend / dayOfMonth) * data.daysIn : null;
   const spendDelta = data.prev.spend > 0 ? ((data.cur.spend - data.prev.spend) / data.prev.spend) * 100 : 0;
   const incomeDelta = data.prev.income > 0 ? ((data.cur.income - data.prev.income) / data.prev.income) * 100 : 0;
   const netCur = data.cur.income - data.cur.spend;
@@ -86,17 +95,18 @@ function DashboardSummary({ txns, onOpenTxn }) {
 
   return (
     <>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>{nav}</div>
       {/* Headline */}
       <div className="grid-2" style={{ marginBottom: 18 }}>
         <div className="card" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div className="card-title">Spent this month</div>
+          <div className="card-title">Spent {isCurrentMonth ? "this month" : window.monthLabel(data.curKey)}</div>
           <div style={{ display: "flex", alignItems: "baseline", gap: 14 }}>
             <span className="amount huge">${data.cur.spend.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span>
             <window.Delta value={spendDelta} suffix="%" invert />
           </div>
           <div style={{ display: "flex", gap: 18, marginTop: 4, color: "var(--muted)", fontSize: 12.5 }}>
-            <span>Projected: <span className="amount" style={{ color: "var(--text)" }}>${projectedSpend.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span></span>
-            <span>Last month: <span className="amount" style={{ color: "var(--text)" }}>${data.prev.spend.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span></span>
+            {isCurrentMonth && projectedSpend !== null && <span>Projected: <span className="amount" style={{ color: "var(--text)" }}>${projectedSpend.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span></span>}
+            <span>Prev month: <span className="amount" style={{ color: "var(--text)" }}>${data.prev.spend.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span></span>
           </div>
           <div style={{ marginTop: 8, height: 100 }}>
             <window.LineChart
@@ -179,10 +189,9 @@ function DashboardSummary({ txns, onOpenTxn }) {
 }
 
 // ---------- Variation B: Insights (heatmap + trend + insight cards) ----------
-function DashboardInsights({ txns, onOpenTxn }) {
-  const data = useDashboardData(txns);
-  const today = new Date();
-  const monthName = today.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+function DashboardInsights({ txns, onOpenTxn, selectedMonth, nav }) {
+  const data = useDashboardData(txns, selectedMonth);
+  const monthName = window.monthLabel(data.curKey);
 
   // Heatmap levels
   const dayMax = Math.max(...data.dayTotals, 1);
@@ -219,6 +228,7 @@ function DashboardInsights({ txns, onOpenTxn }) {
 
   return (
     <>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>{nav}</div>
       <div className="grid-2" style={{ gap: 16, marginBottom: 16 }}>
         <div className="card">
           <div className="card-title">
@@ -380,8 +390,8 @@ function UpcomingRecurring({ txns }) {
 }
 
 // ---------- Variation C: Cashflow streams ----------
-function DashboardCashflow({ txns, onOpenTxn }) {
-  const data = useDashboardData(txns);
+function DashboardCashflow({ txns, onOpenTxn, selectedMonth, nav }) {
+  const data = useDashboardData(txns, selectedMonth);
   const net = data.cur.income - data.cur.spend;
 
   // Income sources
@@ -405,6 +415,7 @@ function DashboardCashflow({ txns, onOpenTxn }) {
 
   return (
     <>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>{nav}</div>
       {/* Top metric row */}
       <div className="grid-4" style={{ marginBottom: 18 }}>
         <div className="card tight">
@@ -542,10 +553,42 @@ function EmptyDashboard() {
   );
 }
 
+function MonthNav({ months, selectedMonth, onChange }) {
+  const idx = months.indexOf(selectedMonth);
+  const canPrev = idx > 0;
+  const canNext = idx < months.length - 1;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      <button className="btn" onClick={() => canPrev && onChange(months[idx - 1])}
+              disabled={!canPrev} style={{ padding: '4px 8px', opacity: canPrev ? 1 : 0.3 }}>
+        <window.Icon name="chevron" size={13} style={{ transform: 'rotate(180deg)' }} />
+      </button>
+      <span style={{ fontSize: 13, fontWeight: 500, minWidth: 90, textAlign: 'center' }}>
+        {window.monthLabel(selectedMonth)}
+      </span>
+      <button className="btn" onClick={() => canNext && onChange(months[idx + 1])}
+              disabled={!canNext} style={{ padding: '4px 8px', opacity: canNext ? 1 : 0.3 }}>
+        <window.Icon name="chevron" size={13} />
+      </button>
+    </div>
+  );
+}
+
 function Dashboard({ variant, txns, onOpenTxn }) {
+  const todayKey = new Date().toISOString().slice(0, 7);
+  const [selectedMonth, setSelectedMonth] = useStateD(todayKey);
+
   if (!txns || txns.length === 0) return <EmptyDashboard />;
-  if (variant === "insights") return <DashboardInsights txns={txns} onOpenTxn={onOpenTxn} />;
-  if (variant === "cashflow") return <DashboardCashflow txns={txns} onOpenTxn={onOpenTxn} />;
-  return <DashboardSummary txns={txns} onOpenTxn={onOpenTxn} />;
+
+  // Collect all months from transactions
+  const monthSet = new Set([todayKey]);
+  txns.forEach((t) => monthSet.add(t.date.slice(0, 7)));
+  const months = Array.from(monthSet).sort();
+
+  const nav = <MonthNav months={months} selectedMonth={selectedMonth} onChange={setSelectedMonth} />;
+
+  if (variant === "insights") return <DashboardInsights txns={txns} onOpenTxn={onOpenTxn} selectedMonth={selectedMonth} nav={nav} />;
+  if (variant === "cashflow") return <DashboardCashflow txns={txns} onOpenTxn={onOpenTxn} selectedMonth={selectedMonth} nav={nav} />;
+  return <DashboardSummary txns={txns} onOpenTxn={onOpenTxn} selectedMonth={selectedMonth} nav={nav} />;
 }
 window.Dashboard = Dashboard;
